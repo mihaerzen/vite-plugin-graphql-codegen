@@ -11,6 +11,13 @@ import { createMatchCache } from "./utils/matchCache";
 import { isBuildMode, isServeMode, type ViteMode } from "./utils/viteModes";
 import type { Plugin } from "vite";
 
+export interface SkipContext {
+  trigger: "start" | "build" | "watch";
+  filePath?: string;
+}
+
+export type SkipFn = (context: SkipContext) => boolean | Promise<boolean>;
+
 export interface Options {
   /**
    * Run codegen on server start.
@@ -90,6 +97,12 @@ export interface Options {
    */
   configFilePathOverride?: string;
   /**
+   * Skip codegen for a given cycle.
+   *
+   * @default false
+   */
+  skip?: boolean | SkipFn;
+  /**
    * Log various steps to aid in tracking down bugs.
    *
    * @default false
@@ -117,6 +130,7 @@ export function GraphQLCodegen(options?: Options): Plugin {
     configOverrideOnBuild = {},
     configOverrideWatcher = {},
     configFilePathOverride,
+    skip = false,
     debug = false,
   } = options ?? {};
 
@@ -137,6 +151,31 @@ export function GraphQLCodegen(options?: Options): Plugin {
       // Vite handles file watching
       watch: false,
     });
+  };
+
+  const shouldSkipGeneration = async (context: SkipContext) => {
+    const skipValue = typeof skip === "function" ? await skip(context) : skip;
+
+    log("Skip evaluated", {
+      ...context,
+      skip: skipValue,
+    });
+
+    return skipValue;
+  };
+
+  const generateIfNotSkipped = async (
+    context: SkipContext,
+    overrideConfig: Partial<CodegenConfig>,
+  ) => {
+    if (await shouldSkipGeneration(context)) {
+      log("Generation skipped", context);
+      return false;
+    }
+
+    await generateWithOverride(overrideConfig);
+
+    return true;
   };
 
   if (options) log("Plugin initialized with options:", options);
@@ -167,8 +206,15 @@ export function GraphQLCodegen(options?: Options): Plugin {
         if (!runOnStart) return;
 
         try {
-          await generateWithOverride(configOverrideOnStart);
-          log("Generation successful on start");
+          const generated = await generateIfNotSkipped(
+            { trigger: "start" },
+            configOverrideOnStart,
+          );
+          log(
+            generated
+              ? "Generation successful on start"
+              : "Generation skipped on start",
+          );
         } catch (error) {
           // GraphQL Codegen handles logging useful errors
           log("Generation failed on start");
@@ -180,8 +226,15 @@ export function GraphQLCodegen(options?: Options): Plugin {
         if (!runOnBuild) return;
 
         try {
-          await generateWithOverride(configOverrideOnBuild);
-          log("Generation successful on build");
+          const generated = await generateIfNotSkipped(
+            { trigger: "build" },
+            configOverrideOnBuild,
+          );
+          log(
+            generated
+              ? "Generation successful on build"
+              : "Generation skipped on build",
+          );
         } catch (error) {
           // GraphQL Codegen handles logging useful errors
           log("Generation failed on build");
@@ -204,8 +257,15 @@ export function GraphQLCodegen(options?: Options): Plugin {
           log("File is in match cache");
 
           try {
-            await generateWithOverride(configOverrideWatcher);
-            log("Generation successful in file watcher");
+            const generated = await generateIfNotSkipped(
+              { trigger: "watch", filePath },
+              configOverrideWatcher,
+            );
+            log(
+              generated
+                ? "Generation successful in file watcher"
+                : "Generation skipped in file watcher",
+            );
           } catch {
             // GraphQL Codegen handles logging useful errors
             log("Generation failed in file watcher");
